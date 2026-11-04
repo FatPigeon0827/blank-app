@@ -1,0 +1,66 @@
+name: Package CAD Sketcher as Docker image
+on:
+  push:
+    branches: [cad-sketcher-package]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch official CAD Sketcher Linux extension
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, urllib.parse, sys, zipfile, os
+          index_url = "https://hlorus.github.io/CAD_Sketcher-extensions/stable/index.json"
+          with urllib.request.urlopen(index_url, timeout=60) as response:
+              records = json.load(response)
+          if isinstance(records, dict):
+              records = records.get("data", records.get("extensions", []))
+          if isinstance(records, dict):
+              records = list(records.values())
+          matches = []
+          for item in records:
+              if not isinstance(item, dict): continue
+              identifier = str(item.get("id", item.get("name", ""))).lower()
+              version = str(item.get("version", ""))
+              platform = str(item.get("platforms", item.get("platform", ""))).lower()
+              url = item.get("archive_url", item.get("download_url"))
+              if "cad" in identifier and "sketch" in identifier and version == "0.32.1" and url and ("linux" in platform or not platform):
+                  matches.append(item)
+          if not matches:
+              raise RuntimeError("Could not find CAD Sketcher v0.32.1 Linux in the official stable index; refusing to publish an unverified version")
+          item = matches[0]
+          url = urllib.parse.urljoin(index_url, item.get("archive_url", item.get("download_url")))
+          print("Downloading official package from:", url)
+          urllib.request.urlretrieve(url, "cad-sketcher-linux.zip")
+          with zipfile.ZipFile("cad-sketcher-linux.zip") as z:
+              bad = z.testzip()
+              if bad: raise RuntimeError("Corrupted ZIP member: " + bad)
+          size = os.stat("cad-sketcher-linux.zip").st_size
+          print("ZIP size:", size)
+          if size >= 2_000_000_000: raise RuntimeError("Archive exceeds 2 GB")
+          PY
+      - name: Write minimal Dockerfile
+        run: |
+          printf 'FROM alpine:3.21\nWORKDIR /payload\nCOPY cad-sketcher-linux.zip /payload/cad-sketcher-linux.zip\nCMD ["sh"]\n' > Dockerfile.cad
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push package
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cad
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/fatpigeon0827/cad-sketcher:0.32.1
